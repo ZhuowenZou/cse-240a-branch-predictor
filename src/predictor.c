@@ -55,7 +55,9 @@ int* lBranchHistoryTable;
 
 int* metaSelector; //select the meta
 
-
+// Hyperceptron 
+int* mapping; // map address
+int* lPerceptron;
 
 //------------------------------------//
 //        Predictor Functions         //
@@ -63,6 +65,281 @@ int* metaSelector; //select the meta
 
 // Initialize the predictor
 // 
+
+void init_hyperceptron() {
+
+    // ghr side
+    int historyBits = 1 << ghistoryBits;
+    gpredictors = (int*)malloc(historyBits * sizeof(int));
+    for (int i = 0; i < historyBits; i++) {
+        gpredictors[i] = WT;
+    }
+    gHistoryTable = 0;
+
+    // random projection for indexing
+    mapping = (uint32_t*)malloc(ghistoryBits * historyBits);
+    int nblocks = historyBits / 32;
+
+    for (int i = 0; i < ghistoryBits; i++) {
+        for (int j = 0; j < nblocks; j++) {
+            mapping[i * nblocks + j] = rand();
+        }
+    }
+
+    // local side 
+    lPatternHistoryTable = (uint32_t*)malloc(historyBits * sizeof(uint32_t));
+    lPerceptron = (int*)malloc(historyBits * sizeof(int));
+    for (int i = 0; i < historyBits; i++) {
+        lPatternHistoryTable[i] = 0;
+    }
+    for (int i = 0; i < historyBits; i++) {
+        lPerceptron[i] = 0;
+    }
+
+    // meta side
+    metaSelector = (int*)malloc(historyBits * sizeof(int));
+    for (int i = 0; i < historyBits; i++) {
+        metaSelector[i] = WT;
+    }
+
+    //fprintf(stderr, "Init_tournament finished");
+}
+
+int
+hyper_predict_local(uint32_t pc) {
+
+
+    int historyBits = 1 << ghistoryBits;
+    int pc_lower_bits = pc & (historyBits - 1);
+
+    // local choice
+    int lchoice;
+    int lhistory_lower = lPatternHistoryTable[pc_lower_bits] & (historyBits - 1);
+    int local = pc_lower_bits ^ (lhistory_lower);
+    int nblocks = historyBits / (32);
+
+    // find hash value for perceptron through random mapping
+    int* x = (uint32_t*)malloc(historyBits);
+    int idx = 0;
+
+    while (local != 0) {
+        if (local % 2 == 1) {
+            for (int j = 0; j < nblocks; j++) {
+                x[j] = ~(x[j] ^ mapping[idx * nblocks + j]);
+            }
+        }
+        idx += 1;
+        local = local / 2;
+    }
+
+    int sum = 0;
+    for (int j = 0; j < nblocks; j++) {
+        int idx = 0;
+        int current = x[j];
+        for (int i = 0; i < 32; i++) {
+            if (current % 2 == 1) {
+                sum += lPerceptron[j * nblocks + idx];
+            }
+            else {
+                sum -= lPerceptron[j * nblocks + idx];
+            }
+            current /= 2;
+        }
+    }
+
+    if (sum >= 0)
+        lchoice = TAKEN;
+    else
+        lchoice = NOTTAKEN;
+
+    free(x);
+
+    return lchoice;
+}
+
+void
+hyper_update_local(uint32_t pc, uint8_t outcome) {
+
+    int historyBits = 1 << ghistoryBits;
+    int pc_lower_bits = pc & (historyBits - 1);
+
+    // local choice
+    int lchoice;
+    int lhistory_lower = lPatternHistoryTable[pc_lower_bits] & (historyBits - 1);
+    int local = pc_lower_bits ^ (lhistory_lower);
+    int nblocks = historyBits / (32);
+
+    // find hash value for perceptron through random mapping
+    int* x = (uint32_t*)malloc(historyBits);
+    int idx = 0;
+
+    while (local != 0) {
+        if (local % 2 == 1) {
+            for (int j = 0; j < nblocks; j++) {
+                x[j] = ~(x[j] ^ mapping[idx * nblocks + j]);
+            }
+        }
+        idx += 1;
+        local = local / 2;
+    }
+
+    int sum = 0;
+    for (int j = 0; j < nblocks; j++) {
+        int idx = 0;
+        int current = x[j];
+        for (int i = 0; i < 32; i++) {
+            lPerceptron[j * nblocks + idx] = (outcome) ? 
+                lPerceptron[j * nblocks + idx] + ((current % 2) * 2 - 1): 
+                lPerceptron[j * nblocks + idx] - ((current % 2) * 2 - 1);
+            current /= 2;
+        }
+    }
+
+    free(x);
+}
+
+int hyper_predict_global(uint32_t pc) {
+
+    int historyBits = 1 << ghistoryBits;
+    int pc_lower_bits = pc & (historyBits - 1);
+    int ghistory_lower = gHistoryTable & (historyBits - 1);
+    int historyIndex = pc_lower_bits ^ (ghistory_lower);
+
+    // global choice
+    int gchoice;
+    switch (gpredictors[historyIndex]) {
+    case SN:
+    case WN:
+        gchoice = NOTTAKEN;
+        break;
+    case WT:
+    case ST:
+        gchoice = TAKEN;
+        break;
+    default:
+        printf("Undefined state in global predictor table");
+        return NOTTAKEN;
+    }
+
+}
+
+uint8_t
+hyperceptron_predict(uint32_t pc) {
+
+    int historyBits = 1 << ghistoryBits;
+    int pc_lower_bits = pc & (historyBits - 1);
+
+    // global choice
+    int gchoice = hyper_predict_global(pc);
+    //local choice
+    int lchoice = hyper_predict_local(pc);
+
+    //meta choice
+    switch (metaSelector[pc_lower_bits]) {
+    case SN:
+    case WN:
+        return gchoice;
+    case WT:
+    case ST:
+        return lchoice;
+    default:
+        printf("Undefined state in meta selector");
+        return gchoice;
+    }
+
+}
+
+void
+train_hyperceptron(uint32_t pc, uint8_t outcome) {
+    uint32_t historyBits = 1 << ghistoryBits;
+    uint32_t pc_lower_bits = pc & (historyBits - 1);
+    uint32_t ghistory_lower = gHistoryTable & (historyBits - 1);
+
+    int historyIndex = pc_lower_bits ^ (ghistory_lower);
+
+    int gresult; // global 
+    switch (gpredictors[historyIndex]) {
+    case SN:
+        gresult = (outcome == NOTTAKEN);
+        gpredictors[historyIndex] = (outcome == TAKEN) ? WN : SN;
+        break;
+    case WN:
+        gresult = (outcome == NOTTAKEN);
+        gpredictors[historyIndex] = (outcome == TAKEN) ? WT : SN;
+        break;
+    case WT:
+        gresult = (outcome == TAKEN);
+        gpredictors[historyIndex] = (outcome == TAKEN) ? ST : WN;
+        break;
+    case ST:
+        gresult = (outcome == TAKEN);
+        gpredictors[historyIndex] = (outcome == TAKEN) ? ST : WT;
+        break;
+    default:
+        break;
+    }
+    gHistoryTable = ((1 << gHistoryTable) | outcome) & (historyBits - 1);
+
+    // local update : perceptron only updates when its prediction's wrong
+    uint32_t lhistory_lower = lPatternHistoryTable[pc_lower_bits] & (historyBits - 1);
+    int lresult; // Wrong or right prediction from local
+
+    int lchoice = hyper_predict_local(pc);
+
+    if (((metaSelector[pc_lower_bits] == WT) || (metaSelector[pc_lower_bits] == ST)) && (lchoice != outcome)) {
+        hyper_update_local(pc, outcome);
+    }
+
+    // meta update : 
+    if (gresult != lresult) {
+        if (lresult) {
+            switch (metaSelector[pc_lower_bits]) {
+            case SN:
+                metaSelector[pc_lower_bits] = (outcome == TAKEN) ? WN : SN;
+                break;
+            case WN:
+                metaSelector[pc_lower_bits] = (outcome == TAKEN) ? WT : SN;
+                break;
+            case WT:
+                metaSelector[pc_lower_bits] = (outcome == TAKEN) ? ST : WN;
+                break;
+            case ST:
+                metaSelector[pc_lower_bits] = (outcome == TAKEN) ? ST : WT;
+                break;
+            default:
+                break;
+            }
+        }
+        else {
+            switch (metaSelector[pc_lower_bits]) {
+            case SN:
+                metaSelector[pc_lower_bits] = (outcome == NOTTAKEN) ? WN : SN;
+                break;
+            case WN:
+                metaSelector[pc_lower_bits] = (outcome == NOTTAKEN) ? WT : SN;
+                break;
+            case WT:
+                metaSelector[pc_lower_bits] = (outcome == NOTTAKEN) ? ST : WN;
+                break;
+            case ST:
+                metaSelector[pc_lower_bits] = (outcome == NOTTAKEN) ? ST : WT;
+                break;
+            default:
+                break;
+            }
+        }
+    }
+}
+
+void
+cleanup_hyperceptron() {
+    free(gpredictors);
+    free(metaSelector);
+    free(lPerceptron);
+    free(mapping);
+    free(lBranchHistoryTable);
+}
+
 
 void init_tournament() {
 
@@ -100,9 +377,11 @@ tournament_predict(uint32_t pc) {
     int pc_lower_bits = pc & (historyBits - 1);
     int ghistory_lower = gHistoryTable & (historyBits - 1);
 
+    int historyIndex = pc_lower_bits ^ (ghistory_lower);
+
     // global choice
     int gchoice;
-    switch (gpredictors[pc_lower_bits]) {
+    switch (gpredictors[historyIndex]) {
     case SN:
     case WN:
         gchoice = NOTTAKEN;
@@ -154,23 +433,25 @@ train_tournament(uint32_t pc, uint8_t outcome) {
     uint32_t pc_lower_bits = pc & (historyBits - 1);
     uint32_t ghistory_lower = gHistoryTable & (historyBits - 1);
 
+    int historyIndex = pc_lower_bits ^ (ghistory_lower);
+
     int gresult; // global 
-    switch (gpredictors[pc_lower_bits]) {
+    switch (gpredictors[historyIndex]) {
     case SN:
         gresult = (outcome == NOTTAKEN);
-        gpredictors[pc_lower_bits] = (outcome == TAKEN) ? WN : SN;
+        gpredictors[historyIndex] = (outcome == TAKEN) ? WN : SN;
         break;
     case WN:
         gresult = (outcome == NOTTAKEN);
-        gpredictors[pc_lower_bits] = (outcome == TAKEN) ? WT : SN;
+        gpredictors[historyIndex] = (outcome == TAKEN) ? WT : SN;
         break;
     case WT:
         gresult = (outcome == TAKEN);
-        gpredictors[pc_lower_bits] = (outcome == TAKEN) ? ST : WN;
+        gpredictors[historyIndex] = (outcome == TAKEN) ? ST : WN;
         break;
     case ST:
         gresult = (outcome == TAKEN);
-        gpredictors[pc_lower_bits] = (outcome == TAKEN) ? ST : WT;
+        gpredictors[historyIndex] = (outcome == TAKEN) ? ST : WT;
         break;
     default:
         break;
@@ -333,6 +614,8 @@ init_predictor()
         init_tournament();
         break;
     case CUSTOM:
+        init_hyperceptron();
+        break;
     default:
       break;
   }
@@ -356,6 +639,7 @@ make_prediction(uint32_t pc)
     case TOURNAMENT:
         return tournament_predict(pc);
     case CUSTOM:
+        return hyperceptron_predict(pc);
     default:
       break;
   }
@@ -380,6 +664,7 @@ train_predictor(uint32_t pc, uint8_t outcome)
     case TOURNAMENT:
         return train_tournament(pc, outcome);
     case CUSTOM:
+        return train_hyperceptron(pc, outcome);
     default:
       break;
   }
@@ -394,11 +679,10 @@ free_predictor()
             break;
         case GSHARE:
             return cleanup_gshare();
-            break;
         case TOURNAMENT:
             return cleanup_tournament();
-            break;
         case CUSTOM:
+            return cleanup_hyperceptron();
         default:
             break;
     }
