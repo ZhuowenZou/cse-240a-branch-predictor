@@ -286,9 +286,12 @@ train_hyperceptron(uint32_t pc, uint8_t outcome) {
 
     int lchoice = hyper_predict_local(pc);
 
-    if (((metaSelector[pc_lower_bits] == WT) || (metaSelector[pc_lower_bits] == ST)) && (lchoice != outcome)) {
-        hyper_update_local(pc, outcome);
-    }
+    //if (((metaSelector[pc_lower_bits] == WT) || (metaSelector[pc_lower_bits] == ST)) && (lchoice != outcome)) {
+    hyper_update_local(pc, outcome);
+    //}
+
+    // Update pattern histroy
+    lPatternHistoryTable[pc_lower_bits] = ((1 << lPatternHistoryTable[pc_lower_bits]) | outcome) & (historyBits - 1);
 
     // meta update : 
     if (gresult != lresult) {
