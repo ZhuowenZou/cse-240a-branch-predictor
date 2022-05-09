@@ -25,9 +25,11 @@ const char *bpName[4] = { "Static", "Gshare",
                           "Tournament", "Custom" };
 
 //define number of bits required for indexing the BHT here. 
-int ghistoryBits = 10; // Number of bits used for Global History
 
-int lhistoryBits = 4; // Number of bits used for Local History Table 
+int ghistorynbit = 12; // Number of bits used for Global History
+
+int lhistorynbit = 10; // Number of bits used in local history
+
 
 int bpType;       // Branch Prediction Type
 int verbose;
@@ -56,8 +58,7 @@ int* lBranchHistoryTable;
 int* metaSelector; //select the meta
 
 // Hyperceptron 
-int* mapping; // map address
-int* lPerceptron;
+int** lPerceptron;
 
 //------------------------------------//
 //        Predictor Functions         //
@@ -69,31 +70,20 @@ int* lPerceptron;
 void init_hyperceptron() {
 
     // ghr side
-    int historyBits = 1 << ghistoryBits;
+    int historyBits = 1 << ghistorynbit;
     gpredictors = (int*)malloc(historyBits * sizeof(int));
     for (int i = 0; i < historyBits; i++) {
         gpredictors[i] = WT;
     }
     gHistoryTable = 0;
 
-    // random projection for indexing
-    mapping = (uint32_t*)malloc(ghistoryBits * historyBits);
-    int nblocks = historyBits / 32;
-
-    for (int i = 0; i < ghistoryBits; i++) {
-        for (int j = 0; j < nblocks; j++) {
-            mapping[i * nblocks + j] = rand();
-        }
-    }
-
     // local side 
-    lPatternHistoryTable = (uint32_t*)malloc(historyBits * sizeof(uint32_t));
-    lPerceptron = (int*)malloc(historyBits * sizeof(int));
+
+    int lochistoryBits = 1 << lhistorynbit;
+
+    lPerceptron = (int**)malloc(historyBits * sizeof(int*));
     for (int i = 0; i < historyBits; i++) {
-        lPatternHistoryTable[i] = 0;
-    }
-    for (int i = 0; i < historyBits; i++) {
-        lPerceptron[i] = 0;
+        lPerceptron[i] = (int*)malloc(ghistorynbit * sizeof(int));
     }
 
     // meta side
@@ -109,42 +99,21 @@ int
 hyper_predict_local(uint32_t pc) {
 
 
-    int historyBits = 1 << ghistoryBits;
+    int historyBits = 1 << ghistorynbit;
     int pc_lower_bits = pc & (historyBits - 1);
+    int ghistory_lower = gHistoryTable & (historyBits - 1);
 
     // local choice
     int lchoice;
-    int lhistory_lower = lPatternHistoryTable[pc_lower_bits] & (historyBits - 1);
-    int local = pc_lower_bits ^ (lhistory_lower);
-    int nblocks = historyBits / (32);
 
-    // find hash value for perceptron through random mapping
-    int* x = (uint32_t*)malloc(historyBits);
-    int idx = 0;
-
-    while (local != 0) {
-        if (local % 2 == 1) {
-            for (int j = 0; j < nblocks; j++) {
-                x[j] = ~(x[j] ^ mapping[idx * nblocks + j]);
-            }
-        }
-        idx += 1;
-        local = local / 2;
-    }
+    //int lhistory_lower = lPatternHistoryTable[pc_lower_bits] & (historyBits - 1);
+    int local = pc_lower_bits ^ (ghistory_lower);
 
     int sum = 0;
-    for (int j = 0; j < nblocks; j++) {
-        int idx = 0;
-        int current = x[j];
-        for (int i = 0; i < 32; i++) {
-            if (current % 2 == 1) {
-                sum += lPerceptron[j * nblocks + idx];
-            }
-            else {
-                sum -= lPerceptron[j * nblocks + idx];
-            }
-            current /= 2;
-        }
+    
+    for (int j = 0; j < ghistorynbit; j++) {
+        sum += ((local % 2) * 2 - 1) * lPerceptron[pc_lower_bits][j];
+        local /= 2;
     }
 
     if (sum >= 0)
@@ -152,55 +121,36 @@ hyper_predict_local(uint32_t pc) {
     else
         lchoice = NOTTAKEN;
 
-    free(x);
-
     return lchoice;
 }
 
 void
 hyper_update_local(uint32_t pc, uint8_t outcome) {
 
-    int historyBits = 1 << ghistoryBits;
+    int historyBits = 1 << ghistorynbit;
     int pc_lower_bits = pc & (historyBits - 1);
+    int ghistory_lower = gHistoryTable & (historyBits - 1);
 
     // local choice
     int lchoice;
-    int lhistory_lower = lPatternHistoryTable[pc_lower_bits] & (historyBits - 1);
-    int local = pc_lower_bits ^ (lhistory_lower);
-    int nblocks = historyBits / (32);
+    //int lhistory_lower = lPatternHistoryTable[pc_lower_bits] & (historyBits - 1);
+    int local = pc_lower_bits ^ (ghistory_lower);
 
-    // find hash value for perceptron through random mapping
-    int* x = (uint32_t*)malloc(historyBits);
-    int idx = 0;
-
-    while (local != 0) {
-        if (local % 2 == 1) {
-            for (int j = 0; j < nblocks; j++) {
-                x[j] = ~(x[j] ^ mapping[idx * nblocks + j]);
-            }
+    for (int j = 0; j < ghistorynbit; j++) {
+        if (outcome) {
+            lPerceptron[pc_lower_bits][j] += ((local % 2) * 2 - 1);
         }
-        idx += 1;
-        local = local / 2;
+        else {
+            lPerceptron[pc_lower_bits][j] -= ((local % 2) * 2 - 1);
+        }
+        local /= 2;
     }
 
-    int sum = 0;
-    for (int j = 0; j < nblocks; j++) {
-        int idx = 0;
-        int current = x[j];
-        for (int i = 0; i < 32; i++) {
-            lPerceptron[j * nblocks + idx] = (outcome) ? 
-                lPerceptron[j * nblocks + idx] + ((current % 2) * 2 - 1): 
-                lPerceptron[j * nblocks + idx] - ((current % 2) * 2 - 1);
-            current /= 2;
-        }
-    }
-
-    free(x);
 }
 
 int hyper_predict_global(uint32_t pc) {
 
-    int historyBits = 1 << ghistoryBits;
+    int historyBits = 1 << ghistorynbit;
     int pc_lower_bits = pc & (historyBits - 1);
     int ghistory_lower = gHistoryTable & (historyBits - 1);
     int historyIndex = pc_lower_bits ^ (ghistory_lower);
@@ -209,7 +159,7 @@ int hyper_predict_global(uint32_t pc) {
     int gchoice;
     switch (gpredictors[historyIndex]) {
     case SN:
-    case WN:
+    case WN: 
         gchoice = NOTTAKEN;
         break;
     case WT:
@@ -226,7 +176,7 @@ int hyper_predict_global(uint32_t pc) {
 uint8_t
 hyperceptron_predict(uint32_t pc) {
 
-    int historyBits = 1 << ghistoryBits;
+    int historyBits = 1 << ghistorynbit;
     int pc_lower_bits = pc & (historyBits - 1);
 
     // global choice
@@ -251,7 +201,7 @@ hyperceptron_predict(uint32_t pc) {
 
 void
 train_hyperceptron(uint32_t pc, uint8_t outcome) {
-    uint32_t historyBits = 1 << ghistoryBits;
+    uint32_t historyBits = 1 << ghistorynbit;
     uint32_t pc_lower_bits = pc & (historyBits - 1);
     uint32_t ghistory_lower = gHistoryTable & (historyBits - 1);
 
@@ -278,19 +228,16 @@ train_hyperceptron(uint32_t pc, uint8_t outcome) {
     default:
         break;
     }
-    gHistoryTable = ((1 << gHistoryTable) | outcome) & (historyBits - 1);
+    
 
     // local update : perceptron only updates when its prediction's wrong
     uint32_t lhistory_lower = lPatternHistoryTable[pc_lower_bits] & (historyBits - 1);
-    int lresult; // Wrong or right prediction from local
+    int lresult = hyper_predict_local(pc); // Wrong or right prediction from local
 
-    int lchoice = hyper_predict_local(pc);
-
-    //if (((metaSelector[pc_lower_bits] == WT) || (metaSelector[pc_lower_bits] == ST)) && (lchoice != outcome)) {
     hyper_update_local(pc, outcome);
-    //}
 
-    // Update pattern histroy
+    // Update pattern histroys 
+    gHistoryTable = ((1 << gHistoryTable) | outcome) & (historyBits - 1);
     lPatternHistoryTable[pc_lower_bits] = ((1 << lPatternHistoryTable[pc_lower_bits]) | outcome) & (historyBits - 1);
 
     // meta update : 
@@ -338,8 +285,13 @@ void
 cleanup_hyperceptron() {
     free(gpredictors);
     free(metaSelector);
+
+    int historyBits = 1 << ghistorynbit;
+    for (int i = 0; i < historyBits; i++) {
+        free(lPerceptron[i]);
+    }
     free(lPerceptron);
-    free(mapping);
+
     free(lBranchHistoryTable);
 }
 
@@ -347,39 +299,39 @@ cleanup_hyperceptron() {
 void init_tournament() {
 
     // ghr side
-    int historyBits = 1 << ghistoryBits;
-    gpredictors = (int*)malloc(historyBits * sizeof(int));
-    for (int i = 0; i < historyBits; i++) {
+    int ghistoryBits = 1 << ghistorynbit;
+    gpredictors = (int*)malloc(ghistoryBits * sizeof(int));
+    for (int i = 0; i < ghistoryBits; i++) {
         gpredictors[i] = WT;
     }
     gHistoryTable = 0;
 
     // local side 
-
-    lPatternHistoryTable = (uint32_t*)malloc(historyBits * sizeof(uint32_t));
-    lBranchHistoryTable = (int*)malloc(historyBits * sizeof(int));
-    for (int i = 0; i < historyBits; i++) {
+    int lhistoryBits = 1 << lhistorynbit;
+    lPatternHistoryTable = (uint32_t*)malloc(lhistoryBits * sizeof(uint32_t));
+    lBranchHistoryTable = (int*)malloc(lhistoryBits * sizeof(int));
+    for (int i = 0; i < lhistoryBits; i++) {
         lPatternHistoryTable[i] = 0;
     }
-    for (int i = 0; i < historyBits; i++) {
+    for (int i = 0; i < lhistoryBits; i++) {
         lBranchHistoryTable[i] = WT;
     }
 
     // meta side
-    metaSelector = (int*)malloc(historyBits * sizeof(int));
-    for (int i = 0; i < historyBits; i++) {
+    metaSelector = (int*)malloc(ghistoryBits * sizeof(int));
+    for (int i = 0; i < ghistoryBits; i++) {
         metaSelector[i] = WT;
     }
 
     //fprintf(stderr, "Init_tournament finished");
 }
 
-uint8_t
-tournament_predict(uint32_t pc) {
-    int historyBits = 1 << ghistoryBits;
-    int pc_lower_bits = pc & (historyBits - 1);
-    int ghistory_lower = gHistoryTable & (historyBits - 1);
+uint8_t 
+tournament_global_predict(uint32_t pc) {
 
+    int ghistoryBits = 1 << ghistorynbit;
+    int pc_lower_bits = pc & (ghistoryBits - 1);
+    int ghistory_lower = gHistoryTable & (ghistoryBits - 1);
     int historyIndex = pc_lower_bits ^ (ghistory_lower);
 
     // global choice
@@ -395,12 +347,20 @@ tournament_predict(uint32_t pc) {
         break;
     default:
         printf("Undefined state in global predictor table");
-        return NOTTAKEN;
+        gchoice = NOTTAKEN;
     }
+    return gchoice;
+}
+
+uint8_t
+tournament_local_predict(uint32_t pc) {
+
+    int lhistoryBits = 1 << lhistorynbit;
+    int pc_lower_bits = pc & (lhistoryBits - 1);
+    int lhistory_lower = lPatternHistoryTable[pc_lower_bits] & (lhistoryBits - 1);
 
     // local choice
-    int lchoice; 
-    int lhistory_lower = lPatternHistoryTable[pc_lower_bits] & (historyBits - 1);
+    int lchoice;
     switch (lBranchHistoryTable[lhistory_lower]) {
     case SN:
     case WN:
@@ -412,9 +372,22 @@ tournament_predict(uint32_t pc) {
         break;
     default:
         printf("Undefined state in local predictor table");
-        return NOTTAKEN;
+        lchoice = NOTTAKEN;
     }
+    return lchoice;
+}
 
+uint8_t
+tournament_predict(uint32_t pc) {
+    
+    int gchoice = tournament_global_predict(pc);
+
+    int lchoice = tournament_local_predict(pc);
+
+
+    int ghistoryBits = 1 << ghistorynbit;
+    int pc_lower_bits = pc & (ghistoryBits - 1);
+    
     //meta choice
     switch (metaSelector[pc_lower_bits]) {
         case SN:
@@ -430,100 +403,94 @@ tournament_predict(uint32_t pc) {
 
 }
 
-void
-train_tournament(uint32_t pc, uint8_t outcome) {
-    uint32_t historyBits = 1 << ghistoryBits;
-    uint32_t pc_lower_bits = pc & (historyBits - 1);
-    uint32_t ghistory_lower = gHistoryTable & (historyBits - 1);
+uint8_t
+tournament_global_update(uint32_t pc, uint8_t outcome) {
 
+    int ghistoryBits = 1 << ghistorynbit;
+    int pc_lower_bits = pc & (ghistoryBits - 1);
+    int ghistory_lower = gHistoryTable & (ghistoryBits - 1);
     int historyIndex = pc_lower_bits ^ (ghistory_lower);
 
-    int gresult; // global 
+    uint8_t gchoice = tournament_global_predict(pc);
+
     switch (gpredictors[historyIndex]) {
     case SN:
-        gresult = (outcome == NOTTAKEN);
         gpredictors[historyIndex] = (outcome == TAKEN) ? WN : SN;
         break;
     case WN:
-        gresult = (outcome == NOTTAKEN);
         gpredictors[historyIndex] = (outcome == TAKEN) ? WT : SN;
         break;
     case WT:
-        gresult = (outcome == TAKEN);
         gpredictors[historyIndex] = (outcome == TAKEN) ? ST : WN;
         break;
     case ST:
-        gresult = (outcome == TAKEN);
         gpredictors[historyIndex] = (outcome == TAKEN) ? ST : WT;
         break;
     default:
         break;
     }
-    gHistoryTable = ((1 << gHistoryTable) | outcome) & (historyBits - 1);
+    gHistoryTable = ((1 << gHistoryTable) | outcome) & (ghistoryBits - 1);
 
+    return gchoice;
+}
+
+uint8_t
+tournament_local_update(uint32_t pc, uint8_t outcome) {
+
+    int lhistoryBits = 1 << lhistorynbit;
+    int pc_lower_bits = pc & (lhistoryBits - 1);
     // local update : BHT + PHT
-    uint32_t lhistory_lower = lPatternHistoryTable[pc_lower_bits] & (historyBits - 1);
-    int lresult; // Wrong or right prediction from local
+    uint32_t lhistory_lower = lPatternHistoryTable[pc_lower_bits] & (lhistoryBits - 1);
+
+    int lchoice = tournament_local_predict(pc);
 
     switch (lBranchHistoryTable[lhistory_lower]) {
     case SN:
-        lresult = (outcome == NOTTAKEN);
         lBranchHistoryTable[lhistory_lower] = (outcome == TAKEN) ? WN : SN;
         break;
     case WN:
-        lresult = (outcome == NOTTAKEN);
         lBranchHistoryTable[lhistory_lower] = (outcome == TAKEN) ? WT : SN;
         break;
     case WT:
-        lresult = (outcome == TAKEN);
         lBranchHistoryTable[lhistory_lower] = (outcome == TAKEN) ? ST : WN;
         break;
     case ST:
-        lresult = (outcome == TAKEN);
         lBranchHistoryTable[lhistory_lower] = (outcome == TAKEN) ? ST : WT;
         break;
     default:
         break;
     }
-    lPatternHistoryTable[pc_lower_bits] = ((1 << lPatternHistoryTable[pc_lower_bits]) | outcome) & (historyBits - 1);
+    lPatternHistoryTable[pc_lower_bits] = ((1 << lPatternHistoryTable[pc_lower_bits]) | outcome) & (lhistoryBits - 1);
+    return lchoice;
+}
+
+
+void
+train_tournament(uint32_t pc, uint8_t outcome) {
+
+    int ghistoryBits = 1 << ghistorynbit;
+    int pc_lower_bits = pc & (ghistoryBits - 1);
+
+    uint8_t gchoice = tournament_global_update(pc, outcome);
+    uint8_t lchoice = tournament_local_update(pc, outcome);
 
     // meta update : 
-    if (gresult != lresult) {
-        if (lresult) {
-            switch (metaSelector[pc_lower_bits]) {
-            case SN:
-                metaSelector[pc_lower_bits] = (outcome == TAKEN) ? WN : SN;
-                break;
-            case WN:
-                metaSelector[pc_lower_bits] = (outcome == TAKEN) ? WT : SN;
-                break;
-            case WT:
-                metaSelector[pc_lower_bits] = (outcome == TAKEN) ? ST : WN;
-                break;
-            case ST:
-                metaSelector[pc_lower_bits] = (outcome == TAKEN) ? ST : WT;
-                break;
-            default:
-                break;
-            }
-        }
-        else {
-            switch (metaSelector[pc_lower_bits]) {
-            case SN:
-                metaSelector[pc_lower_bits] = (outcome == NOTTAKEN) ? WN : SN;
-                break;
-            case WN:
-                metaSelector[pc_lower_bits] = (outcome == NOTTAKEN) ? WT : SN;
-                break;
-            case WT:
-                metaSelector[pc_lower_bits] = (outcome == NOTTAKEN) ? ST : WN;
-                break;
-            case ST:
-                metaSelector[pc_lower_bits] = (outcome == NOTTAKEN) ? ST : WT;
-                break;
-            default:
-                break;
-            }
+    if (gchoice != lchoice) {
+        switch (metaSelector[pc_lower_bits]) {
+        case SN:
+            metaSelector[pc_lower_bits] = (lchoice == outcome) ? WN : SN;
+            break;
+        case WN:
+            metaSelector[pc_lower_bits] = (lchoice == outcome) ? WT : SN;
+            break;
+        case WT:
+            metaSelector[pc_lower_bits] = (lchoice == outcome) ? ST : WN;
+            break;
+        case ST:
+            metaSelector[pc_lower_bits] = (lchoice == outcome) ? ST : WT;
+            break;
+        default:
+            break;
         }
     }
 
@@ -540,9 +507,9 @@ cleanup_tournament() {
 
 //gshare functions
 void init_gshare() {
-  int historyBits = 1 << ghistoryBits;
+  int historyBits = 1 << ghistorynbit;
   gpredictors = (int*) malloc(historyBits * sizeof(int));
-  for(int i = 0; i <= historyBits; i++) {
+  for(int i = 0; i < historyBits; i++) {
     gpredictors[i] = WN;
   }
   gHistoryTable = 0;
@@ -552,7 +519,7 @@ void init_gshare() {
 
 uint8_t 
 gshare_predict(uint32_t pc) {
-  int historyBits = 1 << ghistoryBits;
+  int historyBits = 1 << ghistorynbit;
   int pc_lower_bits = pc & (historyBits - 1);
   int ghistory_lower = gHistoryTable & (historyBits - 1);
   int historyIndex = pc_lower_bits ^ (ghistory_lower);
@@ -574,7 +541,7 @@ gshare_predict(uint32_t pc) {
 
 void
 train_gshare(uint32_t pc, uint8_t outcome) {
-  uint32_t historyBits = 1 << ghistoryBits;
+  uint32_t historyBits = 1 << ghistorynbit;
   uint32_t pc_lower_bits = pc & (historyBits - 1);
   uint32_t ghistory_lower = gHistoryTable & (historyBits - 1);
   uint32_t historyIndex = pc_lower_bits ^ (ghistory_lower);
