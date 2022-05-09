@@ -1,0 +1,7 @@
+
+docker run --rm -it -v c:\Assignment\CSE240\cse-240a-branch-predictor:/testcode gandhardesh13/240a_base:v2
+
+
+
+bunzip2 -kc ../traces/fp_1.bz2 | ./predictor --gshare
+

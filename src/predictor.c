@@ -26,9 +26,10 @@ const char *bpName[4] = { "Static", "Gshare",
 
 //define number of bits required for indexing the BHT here. 
 
-int ghistorynbit = 12; // Number of bits used for Global History
-int lhistorynbit = 10; // Number of bits used in local history
+int ghistorynbit = 12; // c: Number of bits used for Global History
 
+int lpredictionnbit = 10; // b: Number of bits used for local prediction
+int lhistorynbit = 11; // a: Number of bits used for local history
 
 int bpType;       // Branch Prediction Type
 int verbose;
@@ -308,12 +309,14 @@ void init_tournament() {
     // local side 
     int lhistoryBits = 1 << lhistorynbit;
     lPatternHistoryTable = (uint32_t*)malloc(lhistoryBits * sizeof(uint32_t));
-    lBranchHistoryTable = (int*)malloc(lhistoryBits * sizeof(int));
     for (int i = 0; i < lhistoryBits; i++) {
         lPatternHistoryTable[i] = 0;
     }
-    for (int i = 0; i < lhistoryBits; i++) {
-        lBranchHistoryTable[i] = WT;
+
+    int lpredictionBits = 1 << lpredictionnbit;
+    lBranchHistoryTable = (int*)malloc(lpredictionBits * sizeof(int));
+    for (int i = 0; i < lpredictionBits; i++) {
+        lBranchHistoryTable[i] = WN;
     }
 
     // meta side
@@ -402,15 +405,12 @@ tournament_predict(uint32_t pc) {
 
 }
 
-uint8_t
+void
 tournament_global_update(uint32_t pc, uint8_t outcome) {
 
     uint32_t ghistoryBits = 1 << ghistorynbit;
-    uint32_t pc_lower_bits = pc & (ghistoryBits - 1);
     uint32_t ghistory_lower = gHistoryTable & (ghistoryBits - 1);
     uint32_t historyIndex = ghistory_lower; // pc_lower_bits ^ (ghistory_lower);
-
-    uint8_t gchoice = tournament_global_predict(pc);
 
     switch (gpredictors[historyIndex]) {
     case SN:
@@ -428,21 +428,17 @@ tournament_global_update(uint32_t pc, uint8_t outcome) {
     default:
         break;
     }
-    gHistoryTable = ((gHistoryTable << 1) | outcome) & (ghistoryBits - 1);
-
-    return gchoice;
 }
 
-uint8_t
+void
 tournament_local_update(uint32_t pc, uint8_t outcome) {
 
     uint32_t lhistoryBits = 1 << lhistorynbit;
+    uint32_t lpredictionBits = 1 << lpredictionnbit;
+
     uint32_t pc_lower_bits = pc & (lhistoryBits - 1);
-    // local update : BHT + PHT
-    uint32_t lhistory_lower = lPatternHistoryTable[pc_lower_bits] & (lhistoryBits - 1);
-
-    uint8_t lchoice = tournament_local_predict(pc);
-
+    uint32_t lhistory_lower = lPatternHistoryTable[pc_lower_bits] & (lpredictionBits - 1);
+    
     switch (lBranchHistoryTable[lhistory_lower]) {
     case SN:
         lBranchHistoryTable[lhistory_lower] = (outcome == TAKEN) ? WN : SN;
@@ -459,10 +455,7 @@ tournament_local_update(uint32_t pc, uint8_t outcome) {
     default:
         break;
     }
-    lPatternHistoryTable[pc_lower_bits] = ((lPatternHistoryTable[pc_lower_bits] << 1) | outcome) & (lhistoryBits - 1);
-    return lchoice;
 }
-
 
 void
 train_tournament(uint32_t pc, uint8_t outcome) {
@@ -471,8 +464,15 @@ train_tournament(uint32_t pc, uint8_t outcome) {
     uint32_t pc_lower_bits = pc & (ghistoryBits - 1);
     uint32_t ghistory_lower = gHistoryTable & (ghistoryBits - 1);
 
-    uint8_t gchoice = tournament_global_update(pc, outcome);
-    uint8_t lchoice = tournament_local_update(pc, outcome);
+    uint32_t lhistoryBits = 1 << lhistorynbit;
+    uint32_t lpc_lower_bits = pc & (lhistoryBits - 1);
+    uint32_t lpredictionBits = 1 << lpredictionnbit;
+
+    uint8_t gchoice = tournament_global_predict(pc);
+    uint8_t lchoice = tournament_local_predict(pc);
+
+    tournament_global_update(pc, outcome);
+    tournament_local_update(pc, outcome);
 
     // meta update : 
     if (gchoice != lchoice) {
@@ -493,6 +493,10 @@ train_tournament(uint32_t pc, uint8_t outcome) {
             break;
         }
     }
+
+    // update state tables
+    lPatternHistoryTable[lpc_lower_bits] = ((lPatternHistoryTable[lpc_lower_bits] << 1) | outcome) & (lpredictionBits - 1);
+    gHistoryTable = ((gHistoryTable << 1) | outcome) & (ghistoryBits - 1);
 
 }
 
@@ -517,8 +521,6 @@ void init_gshare() {
   }
   gHistoryTable = 0;
 }
-
-
 
 uint8_t 
 gshare_predict(uint32_t pc) {
