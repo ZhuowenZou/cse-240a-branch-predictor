@@ -54,7 +54,6 @@ int gHistoryTable; // ghr
 // int gHistoryTable;
 int* lPatternHistoryTable; 
 int* lBranchHistoryTable; 
-
 int* metaSelector; //select the meta
 
 // Hyperceptron 
@@ -328,6 +327,45 @@ void init_tournament() {
     //fprintf(stderr, "Init_tournament finished");
 }
 
+
+void init_tournament2() {
+
+
+    ghistorynbit = 10; // c: Number of bits used for Global History
+    lpredictionnbit = 11; // b: Number of bits used for local prediction
+    lhistorynbit = 11; // a: Number of bits used for local history
+
+    // ghr side
+    int ghistoryBits = 1 << ghistorynbit;
+    gpredictors = (int*)malloc(ghistoryBits * sizeof(int));
+    for (int i = 0; i < ghistoryBits; i++) {
+        gpredictors[i] = WT;
+    }
+    gHistoryTable = 0;
+
+    // local side 
+    int lhistoryBits = 1 << lhistorynbit;
+    lPatternHistoryTable = (uint32_t*)malloc(lhistoryBits * sizeof(uint32_t));
+    for (int i = 0; i < lhistoryBits; i++) {
+        lPatternHistoryTable[i] = 0;
+    }
+
+    int lpredictionBits = 1 << lpredictionnbit;
+    lBranchHistoryTable = (int*)malloc(lpredictionBits * sizeof(int));
+    for (int i = 0; i < lpredictionBits; i++) {
+        lBranchHistoryTable[i] = WN;
+    }
+
+    // meta side
+    metaSelector = (int*)malloc(ghistoryBits * sizeof(int));
+    for (int i = 0; i < ghistoryBits; i++) {
+        metaSelector[i] = WT;
+    }
+
+    //fprintf(stderr, "Init_tournament finished");
+}
+
+
 uint8_t 
 tournament_global_predict(uint32_t pc) {
 
@@ -509,6 +547,130 @@ cleanup_tournament() {
 }
 
 
+//tournament2
+
+uint8_t
+tournament2_global_predict(uint32_t pc) {
+
+    int ghistoryBits = 1 << ghistorynbit;
+    int pc_lower_bits = pc & (ghistoryBits - 1);
+    int ghistory_lower = gHistoryTable & (ghistoryBits - 1);
+    int historyIndex = pc_lower_bits ^ (ghistory_lower);
+
+    // global choice
+    int gchoice;
+    switch (gpredictors[historyIndex]) {
+    case SN:
+    case WN:
+        gchoice = NOTTAKEN;
+        break;
+    case WT:
+    case ST:
+        gchoice = TAKEN;
+        break;
+    default:
+        printf("Undefined state in global predictor table");
+        gchoice = NOTTAKEN;
+    }
+    return gchoice;
+}
+
+uint8_t
+tournament2_predict(uint32_t pc) {
+
+    int gchoice = tournament2_global_predict(pc);
+
+    int lchoice = tournament_local_predict(pc);
+
+
+    int ghistoryBits = 1 << ghistorynbit;
+    int pc_lower_bits = pc & (ghistoryBits - 1);
+
+    //meta choice
+    switch (metaSelector[pc_lower_bits]) {
+    case SN:
+    case WN:
+        return gchoice;
+    case WT:
+    case ST:
+        return lchoice;
+    default:
+        printf("Undefined state in meta selector");
+        return gchoice;
+    }
+
+}
+
+void
+tournament2_global_update(uint32_t pc, uint8_t outcome) {
+
+    uint32_t ghistoryBits = 1 << ghistorynbit;
+    uint32_t ghistory_lower = gHistoryTable & (ghistoryBits - 1);
+    uint32_t pc_lower_bits = pc & (ghistoryBits - 1);
+    uint32_t historyIndex = pc_lower_bits ^ (ghistory_lower);
+
+    switch (gpredictors[historyIndex]) {
+    case SN:
+        gpredictors[historyIndex] = (outcome == TAKEN) ? WN : SN;
+        break;
+    case WN:
+        gpredictors[historyIndex] = (outcome == TAKEN) ? WT : SN;
+        break;
+    case WT:
+        gpredictors[historyIndex] = (outcome == TAKEN) ? ST : WN;
+        break;
+    case ST:
+        gpredictors[historyIndex] = (outcome == TAKEN) ? ST : WT;
+        break;
+    default:
+        break;
+    }
+}
+
+void
+train_tournament2(uint32_t pc, uint8_t outcome) {
+
+    uint32_t ghistoryBits = 1 << ghistorynbit;
+    uint32_t pc_lower_bits = pc & (ghistoryBits - 1);
+    uint32_t ghistory_lower = gHistoryTable & (ghistoryBits - 1);
+
+    uint32_t lhistoryBits = 1 << lhistorynbit;
+    uint32_t lpc_lower_bits = pc & (lhistoryBits - 1);
+    uint32_t lpredictionBits = 1 << lpredictionnbit;
+
+    uint8_t gchoice = tournament2_global_predict(pc);
+    uint8_t lchoice = tournament_local_predict(pc);
+
+    tournament2_global_update(pc, outcome);
+    tournament_local_update(pc, outcome);
+
+    // meta update : 
+    if (gchoice != lchoice) {
+        switch (metaSelector[ghistory_lower]) {
+        case SN:
+            metaSelector[ghistory_lower] = (lchoice == outcome) ? WN : SN;
+            break;
+        case WN:
+            metaSelector[ghistory_lower] = (lchoice == outcome) ? WT : SN;
+            break;
+        case WT:
+            metaSelector[ghistory_lower] = (lchoice == outcome) ? ST : WN;
+            break;
+        case ST:
+            metaSelector[ghistory_lower] = (lchoice == outcome) ? ST : WT;
+            break;
+        default:
+            break;
+        }
+    }
+
+    // update state tables
+    lPatternHistoryTable[lpc_lower_bits] = ((lPatternHistoryTable[lpc_lower_bits] << 1) | outcome) & (lpredictionBits - 1);
+    gHistoryTable = ((gHistoryTable << 1) | outcome) & (ghistoryBits - 1);
+
+}
+
+
 //gshare functions
 void init_gshare() {
 
@@ -589,7 +751,7 @@ init_predictor()
         init_tournament();
         break;
     case CUSTOM:
-        init_hyperceptron();
+        init_tournament2();
         break;
     default:
       break;
@@ -614,7 +776,7 @@ make_prediction(uint32_t pc)
     case TOURNAMENT:
         return tournament_predict(pc);
     case CUSTOM:
-        return hyperceptron_predict(pc);
+        return tournament2_predict(pc);
     default:
       break;
   }
@@ -639,7 +801,7 @@ train_predictor(uint32_t pc, uint8_t outcome)
     case TOURNAMENT:
         return train_tournament(pc, outcome);
     case CUSTOM:
-        return train_hyperceptron(pc, outcome);
+        return train_tournament2(pc, outcome);
     default:
       break;
   }
@@ -657,7 +819,7 @@ free_predictor()
         case TOURNAMENT:
             return cleanup_tournament();
         case CUSTOM:
-            return cleanup_hyperceptron();
+            return cleanup_tournament();
         default:
             break;
     }
