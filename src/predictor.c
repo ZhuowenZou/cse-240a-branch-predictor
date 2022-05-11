@@ -39,11 +39,10 @@ int perceptron_len = 1024 * 32 / 9;
 int perceptron_precision = 8;
 
 
-int perc_tableSize = 9;
-int magic_prime = 509; // 509, 1021, 2039,  
-
-int perc_ghistnbit = 16;
-int perc_precision = 4;
+ // 509, 1021, 2039,  
+int perc_ghistnbit = 28;
+int perc_precision = 6;
+int perc_tableSize = 193;
 
 //------------------------------------//
 //      Predictor Data Structures     //
@@ -86,8 +85,8 @@ void init_perceptron() {
 
     // ghr side
 
-    perceptronTable = (int8_t**)malloc( (1 << perc_tableSize) * sizeof(int8_t*));
-    for (int i = 0; i < (1 << perc_tableSize); i++) {
+    perceptronTable = (int8_t**)malloc( (perc_tableSize) * sizeof(int8_t*));
+    for (int i = 0; i < (perc_tableSize); i++) {
         perceptronTable[i] = (int8_t*)malloc((perc_ghistnbit) * sizeof(int8_t));
         for (int j = 0; j < perc_ghistnbit; j++) {
             perceptronTable[i][j] = 0;
@@ -96,26 +95,27 @@ void init_perceptron() {
 
     ghr = 0;
     perc_max = 1 << (perc_precision - 1);
-    perc_min = -1 * (1 << (perc_precision - 1));
+    perc_min = -1 * (1 << (perc_precision - 1)) + 1;
 }
 
 
 uint8_t
 perceptron_predict(uint32_t pc) {
 
-    int ghistoryBits = 1 << perc_ghistnbit;
+    int ghistoryBits = 1 << (perc_ghistnbit - 1);
     int ghistory_lower = ghr & (ghistoryBits - 1);
 
-    int addr = pc % magic_prime;
+    int addr = pc % perc_tableSize;
     int8_t* perceptronEntry = perceptronTable[addr];
 
     int sum = 0;
     uint32_t temp = ghistory_lower;
     // Computes perceptron
-    for (int i = 0; i < perc_ghistnbit; i++) {
+    for (int i = 0; i < perc_ghistnbit - 1; i++) {
         sum += perceptronEntry[i] * (2 * (temp % 2) - 1);
         temp = temp / 2;
     }
+    sum += perceptronEntry[perc_ghistnbit - 1]; // bias
 
     uint8_t choice;
     if (sum >= 0)
@@ -132,10 +132,10 @@ train_perceptron(uint32_t pc, uint8_t outcome) {
 
     uint8_t choice = perceptron_predict(pc);
 
-    int ghistoryBits = 1 << perc_ghistnbit;
+    int ghistoryBits = 1 << (perc_ghistnbit - 1);
     int ghistory_lower = ghr & (ghistoryBits - 1);
 
-    int addr = pc % magic_prime;
+    int addr = pc % perc_tableSize;
     int8_t* perceptronEntry = perceptronTable[addr];
 
     if (choice != outcome) {
@@ -143,7 +143,7 @@ train_perceptron(uint32_t pc, uint8_t outcome) {
         uint32_t temp = ghistory_lower;
 
         // Computes perceptron
-        for (int i = 0; i < perc_ghistnbit; i++) {
+        for (int i = 0; i < perc_ghistnbit - 1; i++) {
 
             int direction = ( (temp % 2) * 2 - 1) * ((outcome == TAKEN) ? 1 : -1);
 
@@ -152,6 +152,12 @@ train_perceptron(uint32_t pc, uint8_t outcome) {
 
             temp = temp / 2;
         }
+
+        perceptronEntry[perc_ghistnbit - 1] += (outcome == TAKEN) ? 1 : -1; // bias
+        if (perceptronEntry[perc_ghistnbit - 1] > perc_max)
+            perceptronEntry[perc_ghistnbit - 1] = perc_max;
+        if (perceptronEntry[perc_ghistnbit - 1] < perc_min)
+            perceptronEntry[perc_ghistnbit - 1] = perc_min;
     }
 
     ghr = ((ghr << 1) | outcome) & (ghistoryBits - 1);
@@ -161,7 +167,10 @@ train_perceptron(uint32_t pc, uint8_t outcome) {
 
 void
 cleanup_perceptron() {
-    for (int i = 1; i < (1 << perc_tableSize); i++) {
+
+    //printf("Range: % d, % d \n", perc_max, perc_min);
+
+    for (int i = 1; i < (perc_tableSize); i++) {
         free(perceptronTable[i]);
     }
     free(perceptronTable);
