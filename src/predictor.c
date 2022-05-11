@@ -29,15 +29,21 @@ const char *bpName[4] = { "Static", "Gshare",
 //define number of bits required for indexing the BHT here. 
 
 int ghistorynbit = 12; // c: Number of bits used for Global History
-
 int lpredictionnbit = 10; // b: Number of bits used for local prediction
 int lhistorynbit = 11; // a: Number of bits used for local history
 
 int bpType;       // Branch Prediction Type
 int verbose;
 
+int perceptron_len = 1024 * 32 / 9;
+int perceptron_precision = 8;
 
 
+int perc_tableSize = 9;
+int magic_prime = 509; // 509, 1021, 2039,  
+
+int perc_ghistnbit = 16;
+int perc_precision = 4;
 
 //------------------------------------//
 //      Predictor Data Structures     //
@@ -61,9 +67,11 @@ int* metaSelector; //select the meta
 // Hyperceptron 
 int8_t* perceptron;
 uint8_t* signature;
-int perceptron_len = 1024 * 32 / 9;
-int perceptron_precision = 8;
+
 int perc_max, perc_min;
+
+// Perceptron 
+int8_t** perceptronTable;
 uint32_t ghr;
 
 
@@ -73,6 +81,91 @@ uint32_t ghr;
 
 // Initialize the predictor
 // 
+
+void init_perceptron() {
+
+    // ghr side
+
+    perceptronTable = (int8_t**)malloc( (1 << perc_tableSize) * sizeof(int8_t*));
+    for (int i = 0; i < (1 << perc_tableSize); i++) {
+        perceptronTable[i] = (int8_t*)malloc((perc_ghistnbit) * sizeof(int8_t));
+        for (int j = 0; j < perc_ghistnbit; j++) {
+            perceptronTable[i][j] = 0;
+        }
+    }
+
+    ghr = 0;
+    perc_max = 1 << (perc_precision - 1);
+    perc_min = -1 * (1 << (perc_precision - 1));
+}
+
+
+uint8_t
+perceptron_predict(uint32_t pc) {
+
+    int ghistoryBits = 1 << perc_ghistnbit;
+    int ghistory_lower = ghr & (ghistoryBits - 1);
+
+    int addr = pc % magic_prime;
+    int8_t* perceptronEntry = perceptronTable[addr];
+
+    int sum = 0;
+    uint32_t temp = ghistory_lower;
+    // Computes perceptron
+    for (int i = 0; i < perc_ghistnbit; i++) {
+        sum += perceptronEntry[i] * (2 * (temp % 2) - 1);
+        temp = temp / 2;
+    }
+
+    uint8_t choice;
+    if (sum >= 0)
+        choice = TAKEN;
+    else
+        choice = NOTTAKEN;
+
+    return choice;
+}
+
+void
+train_perceptron(uint32_t pc, uint8_t outcome) {
+
+
+    uint8_t choice = perceptron_predict(pc);
+
+    int ghistoryBits = 1 << perc_ghistnbit;
+    int ghistory_lower = ghr & (ghistoryBits - 1);
+
+    int addr = pc % magic_prime;
+    int8_t* perceptronEntry = perceptronTable[addr];
+
+    if (choice != outcome) {
+
+        uint32_t temp = ghistory_lower;
+
+        // Computes perceptron
+        for (int i = 0; i < perc_ghistnbit; i++) {
+
+            int direction = ( (temp % 2) * 2 - 1) * ((outcome == TAKEN) ? 1 : -1);
+
+            if ((direction > 0) && (perceptronEntry[i] < perc_max) || (direction < 0) && (perceptronEntry[i] > perc_min))
+                perceptronEntry[i] += direction;
+
+            temp = temp / 2;
+        }
+    }
+
+    ghr = ((ghr << 1) | outcome) & (ghistoryBits - 1);
+
+}
+
+
+void
+cleanup_perceptron() {
+    for (int i = 1; i < (1 << perc_tableSize); i++) {
+        free(perceptronTable[i]);
+    }
+    free(perceptronTable);
+}
 
 void init_hyperceptron() {
 
@@ -630,7 +723,7 @@ init_predictor()
         init_tournament();
         break;
     case CUSTOM:
-        init_hyperceptron();
+        init_perceptron();
         break;
     default:
       break;
@@ -655,7 +748,7 @@ make_prediction(uint32_t pc)
     case TOURNAMENT:
         return tournament_predict(pc);
     case CUSTOM:
-        return hyperceptron_predict(pc);
+        return perceptron_predict(pc);
     default:
       break;
   }
@@ -680,7 +773,7 @@ train_predictor(uint32_t pc, uint8_t outcome)
     case TOURNAMENT:
         return train_tournament(pc, outcome);
     case CUSTOM:
-        return train_hyperceptron(pc, outcome);
+        return train_perceptron(pc, outcome);
     default:
       break;
   }
@@ -698,7 +791,7 @@ free_predictor()
         case TOURNAMENT:
             return cleanup_tournament();
         case CUSTOM:
-            return cleanup_hyperceptron();
+            return cleanup_perceptron();
         default:
             break;
     }
